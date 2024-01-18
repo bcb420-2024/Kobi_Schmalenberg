@@ -1,0 +1,41 @@
+---
+title: "Homework 1"
+output: html_notebook
+---
+```{r}
+# Set seed for reproducibility
+set.seed(123)
+
+# Create a 5 by 10 matrix of random integers
+data_matrix <- matrix(sample(1:100, 50, replace = TRUE), nrow = 5, ncol = 10)
+
+# Define column names
+colnames(data_matrix) <- c("cond1", "cond2", "cond3", "cond4", "cond5", "ctrl1", "ctrl2", "ctrl3", "ctrl4", "ctrl5")
+
+# Define row names
+rownames(data_matrix) <- paste("gene", 1:5, sep = "")
+
+# Print the original matrix
+print("Original Matrix:")
+print(data_matrix)
+
+# Function to compute fold change for each gene
+compute_fold_change <- function(data_matrix) {
+  cond_mean <- apply(data_matrix[, 1:5], 1, mean)
+  ctrl_mean <- apply(data_matrix[, 6:10], 1, mean)
+  
+  fold_change <- cond_mean / ctrl_mean
+  return(fold_change)
+}
+
+# Compute fold change for each gene
+fold_change_values <- compute_fold_change(data_matrix)
+
+# Create a data frame with fold change values
+fold_change_df <- data.frame(Gene = rownames(data_matrix), FoldChange = fold_change_values)
+
+# Print the fold change data frame
+print("\nFold Change Values:")
+print(fold_change_df)
+
+```
