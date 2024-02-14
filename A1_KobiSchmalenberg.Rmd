@@ -1,0 +1,202 @@
+---
+title: 'A1: Data set selection and initial Processing'
+author: "Kobi Schmalenberg"
+bibliography: A1.bib
+output:
+  html_document:
+    toc: yes
+    df_print: paged
+  html_notebook:
+    toc: yes
+    theme: united
+---
+# Introductory Information
+**Data Source:** [GSE208438](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE208438)
+
+**Dataset Information**
+The dataset used for this assignment is the entire bulk-seq library consisting of 3 post-mortem suicidal Major Depressive Disorder patient samples as well as 3 control samples. RNA sequencing was completed using Illumina HiSeq^TM^ 2500 and reads were aligned to the GRCh38 human reference genome and transcriptome.
+
+**Relevant Figures**
+![Heatmap illustrating the expression level of DEGs enriched in selected Reactome pathways, gene ontology (GO) terms, and Kyoto Encyclopedia of Genes and Genomes (KEGG) pathways, which is normalized by row.](Figure4E.png)
+**Figure 4E:** Heatmap illustrating the expression level of DEGs enriched in selected Reactome pathways, gene ontology (GO) terms, and Kyoto Encyclopedia of Genes and Genomes (KEGG) pathways, which is normalized by row @sMDD.
+
+![Volcano plot showing all differentially expressed genes between three CTRL and three sMDD samples in bulk RNA‐seq.](FigureEV4A.png)
+**Figure EV4A:** Volcano plot showing all differentially expressed genes between three CTRL and three sMDD samples in bulk RNA‐seq @sMDD.
+
+# Report Questions
+**Why is the dataset of interest to you?**
+This dataset interests me because I wanted to look into datasets relating to depression. I have very close relationships to multiple people who currently have or have overcome various types of depressions and so it has become an area I'd like to know more about.
+
+**What are the control and test conditions of the dataset?/How many samples in each of the conditions of your dataset?**
+For the analysis of bulk-seq data the study that I extract my data from used 3 controls and 3 sMDD(suicidal Major Depressive Disorder) samples. These sMDD samples were from patients who had sMDD and had committed suicide. Each sample was evaluated against a set of 59050 genes. It is not clear how the control samples were formulated or controlled in the original paper @sMDD.
+
+**Were there expression values that were not unique for specific genes? How did you handle these?**
+This case didn't occur throughout my analysis, the data is unique to each sample as each sample is from a different source. Any non-unique sequence counts in the data are a result of coincidence and have no statistical significance.
+
+**Were there expression values that could not be mapped to current HUGO symbols?**
+Seen later in the study, the data came pre-filtered with HUGO symbols in the Geneid column. There are some genes that do not have HUGO symbols associated with them as of the creation of this notebook and thus do not have HUGO symbols in their respective rows.
+
+**Were there any outliers in your dataset? How were they handled in the originating paper? How many outliers were removed?**
+The only outliers that were removed for easier analysis in this study were values in the sequence counts data that were 0. If a 0 was found in any column for a specific row, that row was removed entirely. This filtering was not done in the original paper to the best of my knowledge as there were not specific details about how the data was processed for bulk-sequencing. The dataset after filtering went from 59050 genes to 37713 genes.
+
+**How did you handle replicates?**
+I did not see any replicates in my data and thus did nothing about them.
+
+**What is the final coverage of your dataset?**
+For bulk-seq data specifically the dataset does not cover a large range of patient samples. The genes used in the original paper were aligned using the human reference genome and transcriptome GRCh38 and thus covers the relevant genes from that entire reference.
+
+# Package Installation and Data Setup
+
+First we will install our necessary packages for data processing.
+
+```{r echo = FALSE}
+if (!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+if (!requireNamespace("kableExtra", quietly = TRUE))
+    install.packages("kableExtra")
+if (!requireNamespace("dplyr", quietly = TRUE))
+    install.packages("dplyr")
+if (!requireNamespace("DESeq2", quietly = TRUE))
+    install.packages("DESeq2")
+BiocManager::install("GEOquery")
+
+library(GEOquery)
+library(kableExtra)
+library(dplyr)
+library(DESeq2)
+```
+
+Setup for getting expression data later on.
+
+```{r warning = FALSE}
+# The chosen dataset
+geoID <- "GSE208438"
+
+# Path to store downloaded files
+download_path <- file.path(getwd())
+
+# Platform Information
+gse <- getGEO(geoID, GSEMatrix = FALSE)
+current_gpl <- names(GPLList(gse))[1]
+current_gpl_info <- Meta(getGEO(current_gpl))
+```
+
+# Platform Information
+
+**Platform Title:** `r current_gpl_info$title`\
+**Submission Date:** `r current_gpl_info$submission_date`\
+**Last Update Date:** `r current_gpl_info$last_update_date`\
+**Organism:** `r current_gpl_info$organism` (taxid: `r current_gpl_info$taxid`)
+
+# Getting the Expression Data
+
+```{r echo = FALSE}
+# Run the function to download only files that we do not already have
+suppfiles <- getGEOSuppFiles(geoID, fetch_files = FALSE)
+rna_data_files <- suppfiles$fname[!unlist(lapply(suppfiles$fname, FUN=function(file){
+    file.exists(file.path(download_path, geoID, file))}))]
+
+if(length(rna_data_files) > 0){
+    for(x in 1:length(rna_data_files)){
+        suppfile = getGEOSuppFiles(geoID, filter_regex = rna_data_files[x], baseDir = download_path, fetch_files = TRUE)
+    }
+}
+```
+
+```{r echo = TRUE}
+# Load the downloaded files for processing
+sMDDvsCTRL <- read.table(file.path(download_path, geoID, "GSE208438_sMDD_vs_CTRL_fCount.txt.gz"), header=TRUE, check.names=TRUE)
+
+# Check to see how many unique rows we have in our dataset by comparing the dimensions of the data vs the dimensions of a test vector of all the unique rows filtered by Geneid
+test <- sMDDvsCTRL %>% group_by(Geneid) %>% filter(n() == 1) %>% ungroup()
+
+dim(test)
+dim(sMDDvsCTRL)
+```
+From the unique filtering test, we find that each row is already unique and we do not need to filter rows that are mapped to the same identifier.    
+
+The dataset also contains mostly HUGO Id mapped genes while those without mappings do not have HUGO Ids as of the making of this documentation.
+
+```{r}
+# Gather titles and characteristic data of 6 samples for bulk-seq
+bulk_seq_samples <- do.call(rbind,
+                            lapply(gse@gsms[seq(1:6)],
+                                   FUN=function(gse){
+                                       c(gse@header$title,
+                                         gse@header$characteristics_ch1)
+                                   }
+                                )
+                            )
+```
+
+# Cleaning Up the Data Table
+
+```{r}
+# The following chunk of code is to organize our data tables to have more clear column names and to eliminate uncessary columns.
+
+bulk_seq_samples <- bulk_seq_samples[, 2:6]
+colnames(bulk_seq_samples) <- c("Cell Line", "Culture Time", "Tissue", "Cell Type", "DiseaseState")
+
+
+bulk_seq_samples[, "Cell Line"] <- gsub(bulk_seq_samples[, "Cell Line"], pattern = "cell line: ", replacement="")
+
+row.names(bulk_seq_samples) <- bulk_seq_samples[,"Cell Line"]
+
+bulk_seq_samples <- bulk_seq_samples[, 2:5]
+
+bulk_seq_samples[, "Culture Time"] <- gsub(bulk_seq_samples[, "Culture Time"], pattern = "culture time: ", replacement="")
+bulk_seq_samples[, "Tissue"] <- gsub(bulk_seq_samples[, "Tissue"], pattern = "tissue: ", replacement="")
+bulk_seq_samples[, "Cell Type"] <- gsub(bulk_seq_samples[, "Cell Type"], pattern = "cell type: ", replacement="")
+bulk_seq_samples[, "DiseaseState"] <- gsub(bulk_seq_samples[, "DiseaseState"], pattern = "disease state: ", replacement="")
+
+```
+**Characteristic data visualized:**
+`r kable(bulk_seq_samples, align = "l", format = "html") %>% kable_styling(bootstrap_options = c("striped", "hover"))`  
+
+With this data table we can easily derive which of our columns in the sMDDvsCTRL dataset is a CTRL variable and which is a diseased variable, as well as other characteristics of them.
+
+Now we want to organize our data a bit more for use in DESeq2 analyses.
+
+```{r warning = FALSE}
+# Setup variables metadata and counts for use in DESeq2
+metadata <- bulk_seq_samples
+counts <- sMDDvsCTRL[, 7:12]
+# Manually change column names to make them more human-readable
+colnames(counts) <- c("IMR90-4", "NC3-1", "SA004-1", "SA005-1", "SA007-2", "RC01001-C")
+# Change the ordering of columns in counts data to match the ordering as seen in our metadata
+counts <- counts[, match(rownames(bulk_seq_samples), colnames(counts)), drop = FALSE]
+
+# Run DESeq2 to get a DESeq dataset variable
+DEdata <- DESeqDataSetFromMatrix(countData = counts, colData = metadata, design = ~ DiseaseState)
+
+DEdata <- DESeq(DEdata)
+
+# Create a normalized set from our DESeq data based on our counts dataframe
+normalized_counts <- counts(DEdata, normalized=TRUE)
+
+# Match Geneid to rownames for both dataframes
+rownames(normalized_counts) <- sMDDvsCTRL$Geneid
+rownames(counts) <- sMDDvsCTRL$Geneid
+
+# Filter counts to eliminate rows with a 0 value in any column
+counts <- counts[rowSums(counts == 0, na.rm = TRUE) == 0, ]
+
+# Convert normalized_counts to a dataframe before filtering as it will fail without this conversion
+normalized_counts <- as.data.frame(normalized_counts)
+
+normalized_counts <- normalized_counts[rowSums(normalized_counts == 0, na.rm = TRUE) == 0, ]
+
+```
+**Counts data visualized (head only):**
+`r kable(head(counts), align = "l", format = "html") %>% kable_styling(bootstrap_options = c("striped", "hover"))`
+
+**Normalized data visualized (head only):**
+`r kable(head(normalized_counts), align = "l", format = "html") %>% kable_styling(bootstrap_options = c("striped", "hover"))`  
+
+After the above R code is run we now have two main variables, counts is a dataframe of 6 columns where each column is a sample from our data and the row names of counts is every gene in our dataset. We also have a dataframe normalized_counts which is the same as counts but each value is now normalized.
+
+The normalization method is the same as used in DESeq which finds the ratios of each count in relation to the geometric mean of all read counts for the gene across all of the samples. The scaling factor used is the median of the calculated ratios per sample @DESeq.
+
+I chose this method as it is a typically method used when dealing with sequence count data which is exactly what I have in this case.
+
+# References
