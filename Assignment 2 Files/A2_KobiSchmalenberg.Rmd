@@ -17,8 +17,10 @@ knitr::opts_chunk$set(echo = TRUE, error = FALSE)
 ```{r, include = FALSE, message = FALSE, warning = FALSE}
 if (!requireNamespace("BiocManager", quietly = TRUE))
     install.packages("BiocManager")
+if (!requireNamespace("devtools", quietly = TRUE))
+    install.packages("devtools")
 if (!requireNamespace("kableExtra", quietly = TRUE))
-    install.packages("kableExtra")
+    devtools::install_github("kupietz/kableExtra")
 if (!requireNamespace("dplyr", quietly = TRUE))
     install.packages("dplyr")
 if (!requireNamespace("DESeq2", quietly = TRUE))
@@ -272,7 +274,7 @@ Heatmap(as.matrix(heatmap), top_annotation = map_annotation, cluster_rows = TRUE
 The above heatmap shows up and down regulated regions in both healthy and sMDD samples.
 
 # Thresholded Over-Representation Analysis
-```{r, message=FALSE, error=FALSE}
+```{r, message=FALSE, error=FALSE, warning=FALSE}
 # Find up and down regulated genes from our previous heatmap analysis
 heatmap_genes <- rownames(heatmap)
 
