@@ -1,0 +1,375 @@
+---
+title: "A2: Differential Gene Expression and Preliminary ORA"
+author: "Kobi Schmalenberg"
+bibliography: A2.bib
+output:
+  html_document:
+    toc: yes
+    df_print: paged
+  html_notebook:
+    toc: yes
+    theme: united
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, error = FALSE)
+```
+```{r, include = FALSE, message = FALSE, warning = FALSE}
+if (!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+if (!requireNamespace("kableExtra", quietly = TRUE))
+    install.packages("kableExtra")
+if (!requireNamespace("dplyr", quietly = TRUE))
+    install.packages("dplyr")
+if (!requireNamespace("DESeq2", quietly = TRUE))
+    install.packages("DESeq2")
+if (!requireNamespace("edgeR", quietly = TRUE))
+    install.packages("edgeR")
+if (!requireNamespace("limma", quietly = TRUE))
+    install.packages("limma")
+if (!requireNamespace("ComplexHeatmap", quietly = TRUE))
+    install.packages("ComplexHeatmap")
+if (!requireNamespace("circlize", quietly = TRUE))
+    install.packages("circlize")
+
+BiocManager::install("GEOquery")
+BiocManager::install("biomaRt")
+BiocManager::install("clusterProfiler")
+BiocManager::install("org.Hs.eg.db")
+
+library(GEOquery)
+library(kableExtra)
+library(dplyr)
+library(DESeq2)
+library(edgeR)
+library(limma)
+library(ComplexHeatmap)
+library(circlize)
+library(biomaRt)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+
+# Setting up the necessary data variables from Assignment 1 for use in Assignment 2
+# The chosen dataset
+geoID <- "GSE208438"
+
+# Path to store downloaded files
+download_path <- file.path(getwd())
+
+# Platform Information
+gse <- getGEO(geoID, GSEMatrix = FALSE)
+current_gpl <- names(GPLList(gse))[1]
+current_gpl_info <- Meta(getGEO(current_gpl))
+
+# Run the function to download only files that we do not already have
+suppfiles <- getGEOSuppFiles(geoID, fetch_files = FALSE)
+rna_data_files <- suppfiles$fname[!unlist(lapply(suppfiles$fname, FUN=function(file){
+    file.exists(file.path(download_path, geoID, file))}))]
+
+if(length(rna_data_files) > 0){
+    for(x in 1:length(rna_data_files)){
+        suppfile = getGEOSuppFiles(geoID, filter_regex = rna_data_files[x], baseDir = download_path, fetch_files = TRUE)
+    }
+}
+
+# Load the downloaded files for processing
+sMDDvsCTRL <- read.table(file.path(download_path, geoID, "GSE208438_sMDD_vs_CTRL_fCount.txt.gz"), header=TRUE, check.names=TRUE)
+
+# Gather titles and characteristic data of 6 samples for bulk-seq
+bulk_seq_samples <- do.call(rbind,
+                            lapply(gse@gsms[seq(1:6)],
+                                   FUN=function(gse){
+                                       c(gse@header$title,
+                                         gse@header$characteristics_ch1)
+                                   }
+                                )
+                            )
+bulk_seq_samples <- bulk_seq_samples[, 2:6]
+colnames(bulk_seq_samples) <- c("Cell Line", "Culture Time", "Tissue", "Cell Type", "DiseaseState")
+
+
+bulk_seq_samples[, "Cell Line"] <- gsub(bulk_seq_samples[, "Cell Line"], pattern = "cell line: ", replacement="")
+
+row.names(bulk_seq_samples) <- bulk_seq_samples[,"Cell Line"]
+
+bulk_seq_samples <- bulk_seq_samples[, 2:5]
+
+bulk_seq_samples[, "Culture Time"] <- gsub(bulk_seq_samples[, "Culture Time"], pattern = "culture time: ", replacement="")
+bulk_seq_samples[, "Tissue"] <- gsub(bulk_seq_samples[, "Tissue"], pattern = "tissue: ", replacement="")
+bulk_seq_samples[, "Cell Type"] <- gsub(bulk_seq_samples[, "Cell Type"], pattern = "cell type: ", replacement="")
+bulk_seq_samples[, "DiseaseState"] <- gsub(bulk_seq_samples[, "DiseaseState"], pattern = "disease state: ", replacement="")
+
+# Setup variables metadata and counts for use in DESeq2
+metadata <- bulk_seq_samples
+counts <- sMDDvsCTRL[, 7:12]
+# Manually change column names to make them more human-readable
+colnames(counts) <- c("IMR90-4", "NC3-1", "SA004-1", "SA005-1", "SA007-2", "RC01001-C")
+# Change the ordering of columns in counts data to match the ordering as seen in our metadata
+counts <- counts[, match(rownames(bulk_seq_samples), colnames(counts)), drop = FALSE]
+rownames(counts) <- sMDDvsCTRL$Geneid
+# Filter counts to eliminate rows with a 0 value in any column
+counts <- counts[rowSums(counts == 0, na.rm = TRUE) == 0, ]
+```
+# Packages Used
+GEOquery, biomaRt, clusterProfiler, org.Hs.eg.db @biocond, kableExtra @kableExtra, dplyr @dplyr, DESeq2 @DESeq2, edgeR @edgeR, limma @limma, ComplexHeatmap @cxmap, circlize @circ
+
+# Data Source Refresher/Introduction
+**Data Source:** [GSE208438](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE208438) @sMDD. Data was downloaded using the GEOquery package. 
+
+**Dataset Information:**
+The dataset used for this assignment is the entire bulk-seq library consisting of 3 post-mortem suicidal Major Depressive Disorder patient samples as well as 3 control samples. RNA sequencing was completed using Illumina HiSeq^TM^ 2500 and reads were aligned to the GRCh38 human reference genome and transcriptome.
+
+**Results Summary:**
+To briefly tackle the results of the first assignment, I will showcase 3 figures, the first 2 being the counts data density plot and normalized counts data density plot respectively, followed by an MDS plot grouped by sMDD disease state or healthy disease state. The initial counts plot was constructed using a data frame of the raw counts from our chosen dataset cleaned to removed any 0 count rows. The normalization of the counts data was done using edgeR. MDS plot shows that the sMDD and healthy state samples are not directly similar based on their disease state.
+
+```{r} 
+# Taken from lecture, the following plotting code will first apply log transformation of the counts data and normalized counts data, sets the dimensions of the plot axis, sets colouring of each column from the respective datasets, constructs a density plot with each column as a separate plotted line, and finally constructs a legend.
+
+# Pre-normalization density plot
+
+# Calculate the limits across all the samples
+counts_density <- apply(log2(counts), 2, density)
+
+xlim <- 0; ylim <- 0
+for (i in 1:length(counts_density)) {
+    xlim <- range(c(xlim, counts_density[[i]]$x));
+    ylim <- range(c(ylim, counts_density[[i]]$y))
+}
+
+cols <- rainbow(length(counts_density))
+ltys <- rep(1, length(counts_density))
+
+# Plot the first density plot to initialize the plot
+plot(counts_density[[1]], xlim=xlim, ylim=ylim, type="n",
+    ylab="Smoothing density of log2-CPM",
+    main="Counts", cex.lab = 0.85)
+
+# Plot each line
+for (i in 1:length(counts_density))
+    lines(counts_density[[i]], col=cols[i], lty=ltys[i])
+
+# Create legend
+legend("topright", colnames(counts),
+      col=cols, lty=ltys, cex=0.75,
+      border ="blue", text.col = "green4",
+      merge = TRUE, bg = "gray90")
+
+
+# Convert list object to matrix
+matrix_counts <- matrix(unlist(counts), ncol = 6, byrow = TRUE)
+colnames(matrix_counts) <- colnames(counts) 
+
+# Perform normalization
+dge = DGEList(counts=matrix_counts, group=metadata[, 4])
+dge = calcNormFactors(dge)
+normalized_counts <- cpm(dge)
+rownames(normalized_counts) <- rownames(counts)
+
+# Normalized Density Plot
+normalized_density <- apply(log2(normalized_counts), 2, density)
+
+xlim <- 0; ylim <- 0
+for (i in 1:length(normalized_density)) {
+    xlim <- range(c(xlim, normalized_density[[i]]$x));
+    ylim <- range(c(ylim, normalized_density[[i]]$y))
+    }
+
+cols <- rainbow(length(normalized_density))
+ltys <- rep(1, length(normalized_density))
+# plot the first density plot to initialize the plot
+plot(normalized_density[[1]], xlim=xlim, ylim=ylim, type="n",
+    ylab="Smoothing density of log2-CPM",
+    main="Normalized Counts", cex.lab = 0.85)
+
+# plot each line
+for (i in 1:length(normalized_density))
+    lines(normalized_density[[i]], col=cols[i], lty=ltys[i])
+
+# create legend
+legend("topright", colnames(normalized_counts),
+      col=cols, lty=ltys, cex=0.75,
+      border ="blue", text.col = "green4",
+      merge = TRUE, bg = "gray90")
+
+# MDS Plot using the Limma package
+limma::plotMDS(dge, labels = NULL, pch = 1, col = c("brown", "blue")[factor(metadata[, 4])], main = "MDS Plot")
+legend("bottomright", legend=levels(factor(metadata[, 4])), pch=c(1), col=c("brown","blue"), title="Class", bty='n', cex = 0.75)
+```
+
+# Differential Gene Expression
+**Calculate p-values:**
+```{r, message = FALSE}
+# Calculate dispersion of our previously constructed DGEList
+design <- model.matrix(~ metadata[, 4])
+dge <- estimateDisp(dge, design = design)
+# Fit the model to our design
+model_fit <- glmQLFit(dge, design)
+
+# Calculate p-values
+glm <- glmQLFTest(model_fit)
+
+# Gather the results and check how many genes are under the threshold p-value
+glm_output <- topTags(glm, sort.by = "PValue", n = nrow(normalized_counts))
+rownames(glm_output$table) <- rownames(normalized_counts)
+
+# How many genes are significant based on the p-value
+sig <- length(which(glm_output$table$PValue < 0.05))
+# How many genes are still significant passed correction
+fdr <- length(which(glm_output$table$FDR < 0.05))
+```
+
+1. How many genes were significantly differentially expressed?
+
+`r sig` ->
+This value is the output of genes in the output table under a p-value of 0.05.
+
+2. What thresholds did you use and why?
+
+I used a p-value threshold of 0.05 as this is the scientific standard.
+
+**Multiple-Hypothesis Testing:**
+
+1. Which method did you use? And Why?
+
+After playing around with different adjustment methods in the topTags function, the only one to yield any information at all was using the the False Discovery Rate method. This method at least provides information on whether our results are significant given that they pass the correction test or not.
+
+2. How many genes passed correction?
+
+`r fdr` genes pass correction, up until a FDR of over 80% we get no genes passing correction. This suggests that our results cannot be deemed significant from this analysis thus far, there may be significant amounts of false discovery.
+
+**Showcase the Differentially Expressed Genes:**
+
+```{r}
+# Plot MA plot
+plotMA(dge, main = "MA Plot with Highlighted Genes")
+legend("bottomright", legend = "Genes of Interest", col = "red", pch = 16)
+points(glm$table$logFC[sig], glm$table$logCPM[sig], col = "red", pch = 16)
+```
+
+**Top Hits Heatmap:**
+```{r}
+# Building a heatmap of the p-value results
+top_results <- rownames(glm_output$table)[glm_output$table$PValue < 0.05]
+heatmap_mtx <- normalized_counts
+heatmap <- t(scale(t(heatmap_mtx[which(rownames(heatmap_mtx) %in% top_results), ])))
+
+# Setup colours of the heatmap depending on if the data is positive only or not
+if(min(heatmap) == 0){
+  heatmap_columns = colorRamp2(c(0, max(heatmap)), c("white", "red"))
+} else {
+  heatmap_columns = colorRamp2(c(min(heatmap), 0, max(heatmap)), c("blue", "white", "red"))
+}
+# Generate annotations for the heatmap based on sMDD or healthy state
+disease_state_colours <- c("cyan","orange")
+names(disease_state_colours) <- unique(metadata[,4])
+map_annotation <- HeatmapAnnotation(df = data.frame(metadata[,4]), col = list(DiseaseState = disease_state_colours), show_legend = TRUE)
+
+# Generate a variable containing the heatmap
+Heatmap(as.matrix(heatmap), top_annotation = map_annotation, cluster_rows = TRUE, cluster_columns = TRUE, show_row_dend = TRUE, show_column_dend = TRUE,
+                       col = heatmap_columns, show_column_names = TRUE, show_row_names = FALSE,
+                       show_heatmap_legend = TRUE, column_title = "Top Results Heatmap")
+```
+The above heatmap shows up and down regulated regions in both healthy and sMDD samples.
+
+# Thresholded Over-Representation Analysis
+```{r, message=FALSE, error=FALSE}
+# Find up and down regulated genes from our previous heatmap analysis
+heatmap_genes <- rownames(heatmap)
+
+# Extract up-regulated genes (positive values above a threshold)
+upregulated_genes <- heatmap_genes[heatmap[which(rownames(heatmap) %in% top_results), ] > 1]
+
+# Extract down-regulated genes (negative values below a threshold)
+downregulated_genes <- heatmap_genes[heatmap[which(rownames(heatmap) %in% top_results), ] < 0]
+
+gene_ids <- unique(c(upregulated_genes, downregulated_genes))
+
+# Connect to the Ensembl database through BioMart
+ensembl <- useMart("ENSEMBL_MART_ENSEMBL", dataset = "hsapiens_gene_ensembl")
+
+# Perform ID mappings for subsequent enrichment
+gene_ids <- mapIds(org.Hs.eg.db, keys = gene_ids, column = "ENTREZID", keytype = "SYMBOL")
+upregulated_genes <- mapIds(org.Hs.eg.db, keys = upregulated_genes, column = "ENTREZID", keytype = "SYMBOL")
+downregulated_genes <- mapIds(org.Hs.eg.db, keys = downregulated_genes, column = "ENTREZID", keytype = "SYMBOL")
+
+# Perform gene set enrichment analysis using GO terms
+go_enrich_up <- enrichGO(gene = upregulated_genes, OrgDb = org.Hs.eg.db, keyType = "ENTREZID", ont = "BP", pvalueCutoff = 0.2)
+
+go_enrich_down <- enrichGO(gene = downregulated_genes, OrgDb = org.Hs.eg.db, keyType = "ENTREZID", ont = "BP", pvalueCutoff = 0.2)
+
+go_enrich_all <- enrichGO(gene = gene_ids, OrgDb = org.Hs.eg.db, keyType = "ENTREZID", ont = "BP", pvalueCutoff = 0.2)
+
+# Get the number of data sets
+num_up_sets <- length(go_enrich_up@geneSets)
+num_down_sets <- length(go_enrich_down@geneSets)
+num_all_sets <- length(go_enrich_all@geneSets)
+
+# Get the current version of our package
+go_version <- packageVersion("org.Hs.eg.db")
+
+# Get summary tables of all the enrichments
+summary_up <- go_enrich_up %>%
+  group_by(GeneRatio) %>%
+  summarize(Average_Pvalue = mean(pvalue), 
+            Min_Pvalue = min(pvalue),
+            Max_Pvalue = max(pvalue),
+            Num_Genesets = n_distinct(ID))
+
+summary_down <- go_enrich_down %>%
+  group_by(GeneRatio) %>%
+  summarize(Average_Pvalue = mean(pvalue), 
+            Min_Pvalue = min(pvalue),
+            Max_Pvalue = max(pvalue),
+            Num_Genesets = n_distinct(ID))
+
+summary_all <- go_enrich_all %>%
+  group_by(GeneRatio) %>%
+  summarize(Average_Pvalue = mean(pvalue), 
+            Min_Pvalue = min(pvalue),
+            Max_Pvalue = max(pvalue),
+            Num_Genesets = n_distinct(ID))
+
+# Calculate the average of the average p-values of each enrichment set
+pval_up <- sum(summary_up$Average_Pvalue) / nrow(summary_up)
+pval_down <- sum(summary_down$Average_Pvalue) / nrow(summary_down)
+pval_all <- sum(summary_all$Average_Pvalue) / nrow(summary_all)
+
+# Bind previous calculation into a dataframe for use in visualization with kable
+pvalue_avgs <- data.frame(
+  Data_Frame = c("summary_up", "summary_down", "summary_all"),
+  Average_Pvalue = c(pval_up, pval_down, pval_all))
+```
+
+1. Which method did you choose and why?
+
+I decided to perform enrichment analysis on my datasets using clusterprofiler and the subsequent enrichGO function. I chose this method rather than using gprofiler as enrichGO utilizes the hypergeometric and Fisher exact test statistical methods.
+
+2. What annotation data did you use and why? What version of the annotation are you using?
+
+I am using Gene Ontology. Version `r go_version`. I have chosen GO as there is no well documented method to perform enrichment using Interpro which was my chosen annotation source from the homework assignment. Thus, I have pivoted for this assignment.
+
+3. How many genesets were returned with what thresholds?
+
+Using a threshold value of 0.2, we get **Upregulated**: `r num_up_sets`, **Downregulated**: `r num_down_sets`, **Total**: `r num_all_sets` gene sets.
+
+4. Run the analysis using the up-regulated set of genes, and the down-regulated set of genes separately. How do these results compare to using the whole list (i.e all differentially expressed genes together vs. the up-regulated and down regulated differentially expressed genes separately)?
+
+`r kable(summary_up, caption = "<span style='color:black'>Table 1: Summary of Upregulated Enrichment Results", format = "html", align = "l", col.names = c("Gene Ratio", "Avg Pvalue", "Min Pvalue", "Max Pvalue", "Num Genesets")) %>% kable_styling(bootstrap_options = c("striped", "hover"))`
+`r kable(summary_down, caption = "<span style='color:black'>Table 2: Summary of Downregulated Enrichment Results", format = "html", align = "l", col.names = c("Gene Ratio", "Avg Pvalue", "Min Pvalue", "Max Pvalue", "Num Genesets")) %>% kable_styling(bootstrap_options = c("striped", "hover"))`
+`r kable(summary_all, caption = "<span style='color:black'>Table 3: Summary of All Enrichment Results", format = "html", align = "l", col.names = c("Gene Ratio", "Avg Pvalue", "Min Pvalue", "Max Pvalue", "Num Genesets")) %>% kable_styling(bootstrap_options = c("striped", "hover"))`
+
+`r kable(pvalue_avgs, caption = "<span style='color:black'>Table 4: Average of Average Pvalues", format = "html", align = "l", col.names = c("Enrichment Type", "Average of Avg Pvalues")) %>% kable_styling(bootstrap_options = c("striped", "hover"))`
+
+From table 4 we can see that the upregulated genes have the strongest overall enrichment. This could be attributed to the fact that there are a significant reduction in the number of genes that are upregulated when compared to downregulated genes. From table 3 we can see that the number of genes is the combination of both upregulated and downregulated genes, making the higher average of average pvalues and expected result. Higher number of genes also means there is higher diversity of biological processes enriched by the gene set.
+
+# Interpretation
+
+1. Do the over-representation results support conclusions or mechanism discussed in the original paper?
+
+In order to more easily identify supporting results I used the grep function to find terms mentioned in the original paper within my enriched gene sets. As a result I found that in my downregulated set, voltage-gated calcium channel activity was present, this is in line with what is shown in the article. On the other hand, the article mentioned GABAergic neuron differentiation and potassium channel activity being upregulated. I did not find these terms in my upregulated set. As we saw earlier, the false positive rate was extremely high so it may be a wise conclusion to say that this could have played a role in my results here. Through the same methods I found that synaptic plasticity and calcium response was downregulated in both the article and in the data here while synaptic maturation was found in the downregulated set as seen in the article.
+
+2. Can you find evidence, i.e. publications, to support some of the results that you see. How does this evidence support your results.
+
+I was not able to find other publications that had results supporting the ones found in this analysis.
+
+# References
