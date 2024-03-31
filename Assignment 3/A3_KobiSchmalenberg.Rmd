@@ -19,8 +19,6 @@ if (!requireNamespace("BiocManager", quietly = TRUE))
     install.packages("BiocManager")
 if (!requireNamespace("devtools", quietly = TRUE))
     install.packages("devtools")
-if (!requireNamespace("kableExtra", quietly = TRUE))
-    devtools::install_github("kupietz/kableExtra")
 if (!requireNamespace("dplyr", quietly = TRUE))
     install.packages("dplyr")
 if (!requireNamespace("DESeq2", quietly = TRUE))
@@ -41,7 +39,6 @@ BiocManager::install("org.Hs.eg.db")
 
 library(DESeq2)
 library(GEOquery)
-library(kableExtra)
 library(dplyr)
 library(edgeR)
 library(limma)
@@ -55,14 +52,6 @@ library(org.Hs.eg.db)
 tryCatch(expr = { library("RCurl")}, 
          error = function(e) {  install.packages("RCurl")}, 
          finally = library("RCurl"))
-
-tryCatch(expr = { library("ggplot2")}, 
-         error = function(e) { install.packages("ggplot2")}, 
-         finally = library("ggplot2"))
-
-tryCatch(expr = { library("RCy3")}, 
-         error = function(e) { BiocManager::install("RCy3")}, 
-         finally = library("RCy3"))
 
 # Setting up the necessary data variables from Assignment 1 for use in Assignment 2
 # The chosen dataset
